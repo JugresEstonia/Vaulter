@@ -175,7 +175,7 @@ Use:
 (CLI wraps vault operations with generic “failed” messages and suppresses tracebacks; logs remain local.)
 
 6.2 Handle exceptions consistently
-- [ ] Do not let malformed input crash the program.
+- [x] Do not let malformed input crash the program.
 
 6.3 Fail securely
 - [x] On corruption → shut down operations safely.
