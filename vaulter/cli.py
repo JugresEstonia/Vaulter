@@ -1,4 +1,4 @@
-import typer, getpass, pathlib, sys, os, stat, base64, re
+import typer, getpass, pathlib, sys, os, stat, base64
 from datetime import datetime
 from .storage import Vault, _dec_name, write_secure_file
 from .crypto import NONCE_SIZE, zero_bytes
@@ -192,15 +192,23 @@ def lst_cmd(vault: str, raw: bool = typer.Option(False, "--raw", help="Show raw 
             typer.echo(f"{name}\t{r.size} bytes\tid={r.id}\tadded={ts}")
 
 def _expand_range(pattern: str) -> list[str] | None:
-    """Expand brace expressions like `file{001..010}.txt` into individual names."""
-    match = re.fullmatch(r"^(.*)\{(\d+)\.\.(\d+)\}(.*)$", pattern)
-    if not match:
+    """Deterministically expand brace ranges without regex backtracking risks."""
+    try:
+        lbrace = pattern.index("{")
+        rbrace = pattern.index("}", lbrace + 1)
+    except ValueError:
         return None
-    prefix, start, end, suffix = match.groups()
-    start_i, end_i = int(start), int(end)
+    inner = pattern[lbrace + 1 : rbrace]
+    if ".." not in inner:
+        return None
+    start_txt, end_txt = inner.split("..", 1)
+    if not (start_txt.isdigit() and end_txt.isdigit()):
+        return None
+    prefix, suffix = pattern[:lbrace], pattern[rbrace + 1 :]
+    start_i, end_i = int(start_txt), int(end_txt)
     if start_i > end_i:
         start_i, end_i = end_i, start_i
-    width = max(len(start), len(end))
+    width = max(len(start_txt), len(end_txt))
     return [f"{prefix}{str(i).zfill(width)}{suffix}" for i in range(start_i, end_i + 1)]
 
 
