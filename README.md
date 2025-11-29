@@ -1,6 +1,6 @@
 # Vaulter
 
-**Vaulter** is a minimal, security-first encrypted file vault.
+**Vaulter** is a minimal, security-first encrypted file vault for UNIX systems.
 It uses Argon2id + XChaCha20-Poly1305 encryption. All metadata and filenames are protected inside an encrypted index; the vault folder itself only contains ciphertext blobs.
 
 ---
@@ -11,8 +11,7 @@ It uses Argon2id + XChaCha20-Poly1305 encryption. All metadata and filenames are
 git clone https://github.com/JugresEstonia/Vaulter.git
 cd vaulter
 python -m venv .venv
-source .venv/bin/activate   # Linux / Mac
-.venv\Scripts\activate      # Windows PowerShell
+source .venv/bin/activate
 
 pip install -e .
 ```
