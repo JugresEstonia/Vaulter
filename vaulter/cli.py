@@ -240,30 +240,12 @@ def get(
     v = Vault(pathlib.Path(vault))
     pw = ask_pw()
 
-    expanded_names: list[str] = []
-    for entry in names:
-        rng = _expand_range(entry)
-        if rng:
-            expanded_names.extend(rng)
-        else:
-            expanded_names.append(entry)
+    expanded_names = _expand_name_patterns(names)
     if not expanded_names:
         typer.echo("✖ No files specified")
         raise typer.Exit(1)
 
-    if out == "-" and len(expanded_names) == 1:
-        outputs = ["-"]
-    else:
-        template_range = None if out in ("-", None) else _expand_range(out)
-        if template_range:
-            if len(template_range) != len(expanded_names):
-                typer.echo("✖ Output range count does not match number of files")
-                raise typer.Exit(1)
-            outputs = template_range
-        elif out not in ("-", None) and len(expanded_names) == 1:
-            outputs = [out]
-        else:
-            outputs = _prompt_for_outputs(len(expanded_names), None if out in ("-", None) else out)
+    outputs = _resolve_outputs(out, expanded_names)
 
     errors = 0
     for idx, name in enumerate(expanded_names):
@@ -598,3 +580,28 @@ def recover(
         typer.echo("✖ Failed to reset password with recovery key")
         raise typer.Exit(1)
     typer.echo("✔ Vault password reset. Use the new password for future operations.")
+def _expand_name_patterns(names: list[str]) -> list[str]:
+    """Expand all brace expressions from the CLI arguments into concrete names."""
+    expanded: list[str] = []
+    for entry in names:
+        rng = _expand_range(entry)
+        if rng:
+            expanded.extend(rng)
+        else:
+            expanded.append(entry)
+    return expanded
+
+
+def _resolve_outputs(out: str, expanded_names: list[str]) -> list[str | None]:
+    """Resolve the desired output destinations for each requested record."""
+    if out == "-" and len(expanded_names) == 1:
+        return ["-"]
+    template_range = None if out in ("-", None) else _expand_range(out)
+    if template_range:
+        if len(template_range) != len(expanded_names):
+            typer.echo("✖ Output range count does not match number of files")
+            raise typer.Exit(1)
+        return template_range
+    if out not in ("-", None) and len(expanded_names) == 1:
+        return [out]
+    return _prompt_for_outputs(len(expanded_names), None if out in ("-", None) else out)
