@@ -21,6 +21,7 @@ ARGON2_PARAMS = dict(
 
 
 def kdf_argon2id(password_bytes: bytes, salt: bytes) -> bytes:
+    """Derive a 32-byte key from the user-supplied password using Argon2id."""
     try:
         return hash_secret_raw(password_bytes, salt, **ARGON2_PARAMS)
     finally:
@@ -28,28 +29,22 @@ def kdf_argon2id(password_bytes: bytes, salt: bytes) -> bytes:
 
 
 def gen_nonce() -> bytes:
-    # XChaCha20-Poly1305 uses 24-byte (192-bit) nonces
+    """Return a cryptographically-random 24-byte nonce for XChaCha20-Poly1305."""
     return os.urandom(NONCE_SIZE)
 
 
 def gen_key() -> bytes:
-    # 256-bit key
+    """Return a random 256-bit key for wrapping DEKs and encrypting filenames."""
     return os.urandom(KEY_SIZE)
 
 
 def aead_encrypt(key: bytes, nonce: bytes, plaintext: bytes, ad: bytes) -> bytes:
-    """
-    XChaCha20-Poly1305 AEAD encryption.
-    nonce must be 24 bytes.
-    """
+    """Encrypt `plaintext` with XChaCha20-Poly1305 using the supplied nonce and AD."""
     return crypto_aead_xchacha20poly1305_ietf_encrypt(plaintext, ad, nonce, key)
 
 
 def aead_decrypt(key: bytes, nonce: bytes, ciphertext: bytes, ad: bytes) -> bytes:
-    """
-    XChaCha20-Poly1305 AEAD decryption.
-    nonce must be 24 bytes.
-    """
+    """Decrypt a ciphertext produced by `aead_encrypt`, raising ValueError on failure."""
     try:
         return crypto_aead_xchacha20poly1305_ietf_decrypt(ciphertext, ad, nonce, key)
     except CryptoError as exc:
@@ -57,13 +52,11 @@ def aead_decrypt(key: bytes, nonce: bytes, ciphertext: bytes, ad: bytes) -> byte
 
 
 def consteq(a: bytes, b: bytes) -> bool:
+    """Constant-time comparison helper to avoid timing leaks when comparing secrets."""
     return hmac.compare_digest(a, b)
 
 def zero_bytes(b: bytes):
-    """
-    Best-effort zeroization for sensitive byte arrays.
-    Works on bytearray memoryviews; if immutable, the GC will drop it anyway.
-    """
+    """Best-effort zeroization for mutable buffers that held sensitive information."""
     if isinstance(b, bytearray):
         for i in range(len(b)):
             b[i] = 0

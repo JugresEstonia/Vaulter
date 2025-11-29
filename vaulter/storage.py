@@ -13,8 +13,13 @@ from .logging import get_logger
 
 LOG = get_logger(False)
 
-def b64e(b: bytes) -> str: return base64.b64encode(b).decode("ascii")
-def b64d(s: str) -> bytes: return base64.b64decode(s.encode("ascii"))
+def b64e(b: bytes) -> str:
+    """Return ASCII-safe base64 encoding (used for config/index serialization)."""
+    return base64.b64encode(b).decode("ascii")
+
+def b64d(s: str) -> bytes:
+    """Decode ASCII base64 strings back into bytes."""
+    return base64.b64decode(s.encode("ascii"))
 
 MAX_BLOB_SIZE = 1 << 35  # 32 GiB limit for blobs/index payloads
 NOFOLLOW_FLAG = getattr(os, "O_NOFOLLOW", 0)
@@ -22,11 +27,12 @@ MASTER_WRAP_CONTEXT = b"master-wrap"
 RECOVERY_WRAP_CONTEXT = b"recovery-master"
 
 def _require_min_length(buf: bytes, expected: int, what: str):
+    """Guard against truncated buffers by enforcing a minimum byte length."""
     if len(buf) < expected:
         raise ValueError(f"{what} is too short ({len(buf)} < {expected})")
 
 def _safe_add(a: int, b: int, limit: int = MAX_BLOB_SIZE) -> int:
-    """Safe addition helper for size arithmetic (prevents overflow in bounded space)."""
+    """Perform bounded addition that raises if the result exceeds `limit`."""
     if a < 0 or b < 0:
         raise ValueError("size values must be non-negative")
     if a > limit or b > limit or a + b > limit:
@@ -34,12 +40,14 @@ def _safe_add(a: int, b: int, limit: int = MAX_BLOB_SIZE) -> int:
     return a + b
 
 def _check_size(value: int, label: str):
+    """Validate that numeric sizes stay within MAX_BLOB_SIZE and are non-negative."""
     if value < 0:
         raise ValueError(f"{label} cannot be negative")
     if value > MAX_BLOB_SIZE:
         raise OverflowError(f"{label} exceeds supported limit ({value} > {MAX_BLOB_SIZE})")
 
 def ensure_not_symlink(path: pathlib.Path, label: str):
+    """Raise if `path` exists as a symlink, preventing symlink traversal attacks."""
     try:
         st = os.lstat(path)
     except FileNotFoundError:
@@ -48,6 +56,7 @@ def ensure_not_symlink(path: pathlib.Path, label: str):
         raise RuntimeError(f"{label} {path} is a symlink, which is not allowed")
 
 def ensure_regular_file(path: pathlib.Path, label: str, allow_missing: bool = False):
+    """Ensure the path is a regular file (or optionally missing) and not linked."""
     try:
         st = os.lstat(path)
     except FileNotFoundError:
@@ -60,9 +69,7 @@ def ensure_regular_file(path: pathlib.Path, label: str, allow_missing: bool = Fa
         raise RuntimeError(f"{label} {path} has unexpected hard links")
 
 def safe_read_bytes(path: pathlib.Path) -> bytes:
-    """
-    Atomically open and read a file while holding the descriptor, preventing TOCTOU.
-    """
+    """Atomically open and fully read a file while keeping the descriptor pinned."""
     ensure_regular_file(path, str(path))
     flags = os.O_RDONLY
     if NOFOLLOW_FLAG:
@@ -73,7 +80,7 @@ def safe_read_bytes(path: pathlib.Path) -> bytes:
     return data
 
 def write_secure_file(path, data: bytes):
-    """Write file with mode 0600 (owner read/write only)."""
+    """Atomically write sensitive data with 0600 permissions and fsync semantics."""
     path = pathlib.Path(path)
     ensure_not_symlink(path.parent, "Parent directory")
     ensure_not_symlink(path, "Target file")
@@ -93,6 +100,7 @@ def write_secure_file(path, data: bytes):
     ensure_regular_file(path, "Target file")
 
 def check_vault_permissions(path: pathlib.Path):
+    """Ensure vault directories are owned by the user and not world-accessible."""
     if os.name != "posix":
         return  # only enforce on Linux/Unix
     try:
@@ -110,11 +118,13 @@ def check_vault_permissions(path: pathlib.Path):
         pass
 
 def _enc_name(master_key: bytes, name: str) -> str:
+    """Encrypt user-visible filenames so the on-disk index stores only ciphertext."""
     name_nonce = gen_nonce()                     # 24 bytes for XChaCha20-Poly1305
     ct = aead_encrypt(master_key, name_nonce, name.encode(), b"fname")
     return b64e(name_nonce + ct)
 
 def _dec_name(master_key: bytes, enc_name_b64: str) -> str:
+    """Decrypt an encrypted filename payload stored within the index."""
     raw = b64d(enc_name_b64)
     _check_size(len(raw), "encoded name length")
     _require_min_length(raw, NONCE_SIZE + 16, "encrypted filename")
@@ -124,6 +134,7 @@ def _dec_name(master_key: bytes, enc_name_b64: str) -> str:
 NAME_PATTERN = re.compile(r"^[A-Za-z0-9._ -]{1,255}$")
 
 def _validate_name(name: str) -> str:
+    """Validate logical names (length, charset, traversal) before storage."""
     if not isinstance(name, str):
         raise TypeError("name must be a string")
     if not name:
@@ -141,15 +152,14 @@ def _validate_name(name: str) -> str:
     return name
 
 def canonicalize_path(path: pathlib.Path) -> pathlib.Path:
-    """
-    Return an absolute, symlink-resolved version of the provided path.
-    Ensures vault operations always operate on canonical paths.
-    """
+    """Return a symlink-resolved absolute path for every vault root."""
     p = pathlib.Path(path).expanduser()
     return p.resolve(strict=False)
 
 class Vault:
+    """High-level API for manipulating a vault root: init, add, get, rm, checks."""
     def __init__(self, root: pathlib.Path):
+        """Prepare a Vault at `root`, validating permissions and creating structure."""
         self.root = canonicalize_path(root)
         ensure_not_symlink(self.root, "Vault root")
         check_vault_permissions(self.root)   # <--- new
@@ -159,9 +169,11 @@ class Vault:
         self._mkroot()
 
     def _store_cfg(self, cfg: VaultConfig):
+        """Serialize and persist `config.json` with strict permissions."""
         write_secure_file(self.config_path, cfg.model_dump_json(indent=2).encode())
 
     def _mkroot(self):
+        """Ensure required directories (root + blobs/) exist with correct modes."""
         self.root.mkdir(parents=True, exist_ok=True)
         ensure_not_symlink(self.root, "Vault root")
         if os.name == "posix":
@@ -173,6 +185,7 @@ class Vault:
             os.chmod(self.blobs_dir, 0o700)
 
     def init(self, password: bytes, enable_recovery: bool = False):
+        """Create a new vault, generating master/recovery keys and an empty index."""
         assert not self.config_path.exists(), "Vault already exists"
         salt = os.urandom(16)
         ad = os.urandom(16)
@@ -212,11 +225,13 @@ class Vault:
         return recovery_key
 
     def _load_cfg(self) -> VaultConfig:
+        """Load and parse config.json into a `VaultConfig` object."""
         ensure_regular_file(self.config_path, "config.json")
         raw = safe_read_bytes(self.config_path)
         return VaultConfig.model_validate_json(raw.decode())
 
     def _load_master_key(self, password: bytes) -> bytes:
+        """Derive the master key using the user password (or wrapped master)."""
         cfg = self._load_cfg()
         derived = kdf_argon2id(password, b64d(cfg.kdf_salt_b64))
         if cfg.wrapped_master_b64 and cfg.master_wrap_nonce_b64:
@@ -231,6 +246,7 @@ class Vault:
         return derived
 
     def _load_master_key_from_recovery(self, recovery_key: bytes) -> bytes:
+        """Unwrap the master key using the stored recovery key blob."""
         cfg = self._load_cfg()
         if cfg.recovery is None:
             raise RuntimeError("Recovery key not configured for this vault")
@@ -242,6 +258,7 @@ class Vault:
         )
 
     def _load_index(self, master_key: bytes) -> IndexFile:
+        """Decrypt and deserialize index.bin using the provided master key."""
         cfg = self._load_cfg()
         ensure_regular_file(self.index_path, "index.bin")
         raw = safe_read_bytes(self.index_path)
@@ -253,6 +270,7 @@ class Vault:
         return IndexFile.model_validate_json(pt.decode())
 
     def _store_index(self, master_key: bytes, idx: IndexFile):
+        """Encrypt and write the provided IndexFile back to disk."""
         cfg = self._load_cfg()
         nonce = gen_nonce()
         pt = idx.model_dump_json().encode()
@@ -263,6 +281,7 @@ class Vault:
 
 
     def add_file(self, password: bytes, src_path: pathlib.Path, alias: str | None = None):
+        """Encrypt `src_path` and register it in the index under the optional alias."""
         master = self._load_master_key(password)
         idx = self._load_index(master)
         src = src_path.resolve(strict=True)
@@ -313,6 +332,7 @@ class Vault:
         del data, dek, master
 
     def get_file(self, password: bytes, name: str, out: pathlib.Path | None):
+        """Retrieve `name` from the vault, returning bytes or writing to `out`."""
         name = _validate_name(name)
         master = self._load_master_key(password)
         idx = self._load_index(master)
@@ -350,7 +370,8 @@ class Vault:
             f.flush()
             os.fsync(f.fileno())
 
-    def remove(self, password: bytes, name: str, erase_blob: bool = False):
+    def remove(self, password: bytes, name: str, erase_blob: bool = True):
+        """Remove a record from the index, optionally retaining its ciphertext blob."""
         name = _validate_name(name)
         master = self._load_master_key(password)
         idx = self._load_index(master)
@@ -375,6 +396,7 @@ class Vault:
         zero_bytes(bytearray(master))
 
     def reset_password_with_recovery(self, recovery_key: bytes, new_password: bytes):
+        """Rewrap the master key using a recovery key and newly supplied password."""
         cfg = self._load_cfg()
         master = self._load_master_key_from_recovery(recovery_key)
         new_salt = os.urandom(16)

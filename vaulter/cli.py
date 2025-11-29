@@ -1,4 +1,4 @@
-import typer, getpass, pathlib, sys, os, stat, base64
+import typer, getpass, pathlib, sys, os, stat, base64, re
 from datetime import datetime
 from .storage import Vault, _dec_name, write_secure_file
 from .crypto import NONCE_SIZE, zero_bytes
@@ -7,11 +7,16 @@ from .logging import get_logger
 app = typer.Typer(no_args_is_help=True)
 LOG = get_logger(False)
 
+def _log_error(event: str, message: str, **details):
+    LOG.error(event, message=message, **details)
+
 def ask_pw(prompt="Master password: ") -> bytes:
+    """Prompt the user for a password using getpass and return UTF-8 bytes."""
     pw = getpass.getpass(prompt)
     return pw.encode("utf-8")
 
 def _format_timestamp(ts: str) -> str:
+    """Display ISO timestamps from the index in HH:MM:SS DD.MM.YYYY format."""
     try:
         dt = datetime.strptime(ts, "%Y-%m-%dT%H:%M:%SZ")
         return dt.strftime("%H:%M:%S %d.%m.%Y")
@@ -19,13 +24,16 @@ def _format_timestamp(ts: str) -> str:
         return ts
 
 def _load_master_or_exit(vault_obj: Vault, password: bytes) -> bytes:
+    """Attempt to load the master key, logging and exiting on authentication failure."""
     try:
         return vault_obj._load_master_key(password)
     except ValueError:
+        _log_error("auth_failed", message="Incorrect master password", vault=str(vault_obj.root))
         typer.echo("✖ Incorrect master password.")
         raise typer.Exit(1)
 
 def ask_new_password() -> bytes:
+    """Prompt the user twice for a new master password and ensure the entries match."""
     first = ask_pw("New master password: ")
     second = ask_pw("Confirm new master password: ")
     if first != second:
@@ -34,6 +42,7 @@ def ask_new_password() -> bytes:
     return first
 
 def _load_recovery_key(value: str | None, path: str | None) -> bytes:
+    """Accept either a literal key string or file path and return the decoded bytes."""
     if (value is None and path is None) or (value is not None and path is not None):
         raise typer.BadParameter("Provide exactly one of --recovery-key or --recovery-key-file")
     data: str
@@ -47,6 +56,7 @@ def _load_recovery_key(value: str | None, path: str | None) -> bytes:
         raise typer.BadParameter("Recovery key must be base64 encoded") from exc
 
 def _default_recovery_path(vault_path: pathlib.Path) -> pathlib.Path:
+    """Derive the default `<vault>.recovery.key` path for new vaults."""
     resolved = pathlib.Path(vault_path).expanduser().resolve()
     return resolved.parent / f"{resolved.name}.recovery.key"
 
@@ -55,7 +65,7 @@ def init(
     vault: str = typer.Option(..., "--vault", dir_okay=True, file_okay=False, readable=True, writable=True),
     enable_recovery: bool = typer.Option(False, "--enable-recovery", help="Generate a one-time recovery key file"),
 ):
-    """Initialize a new vault directory and set its master password."""
+    """Initialize a new vault directory, master key, and optional recovery key."""
     vault_path = pathlib.Path(vault)
     v = Vault(vault_path)
     pw = ask_pw("Set master password: ")
@@ -80,7 +90,7 @@ def init(
         finally:
             zero_bytes(bytearray(recovery_key))
         typer.echo(
-            f"Recovery key stored at {recovery_path}. Move it offline (password manager, encrypted USB, paper) and delete the local copy after backup—anyone with this file can reset your vault."
+            f"Recovery key stored at {recovery_path}.\nMove it offline (password manager, encrypted USB, paper) and delete the local copy after backup—anyone with this file can reset your vault."
         )
 
 @app.command()
@@ -89,8 +99,9 @@ def add(
     paths: list[str] = typer.Argument(..., metavar="PATH", help="One or more files to add"),
     name: str = typer.Option(None, "--name", help="Optional alias (only valid for single file)"),
 ):
-    """Encrypt and store one or more files in the vault."""
+    """Encrypt and store one or more files in the vault, ensuring unique names."""
     if len(paths) > 1 and name is not None:
+        _log_error("add_invalid_usage", message="--name used with multiple files", vault=vault)
         typer.echo("✖ --name can only be used when adding a single file")
         raise typer.Exit(1)
     v = Vault(pathlib.Path(vault))
@@ -99,6 +110,7 @@ def add(
     try:
         idx = v._load_index(master)
     except Exception as exc:
+        _log_error("load_index_failed", message="Failed to load vault index", vault=vault, error=str(exc))
         typer.echo(f"✖ Failed to load vault index: {exc}")
         raise typer.Exit(1)
     existing_names = set()
@@ -113,6 +125,7 @@ def add(
     for raw_path in paths:
         p = pathlib.Path(raw_path)
         if p.is_dir():
+            _log_error("add_directory_not_supported", message="Attempted to add directory", vault=vault, path=str(p))
             typer.echo(f"✖ {p} is a directory; directories are not supported")
             errors += 1
             continue
@@ -120,6 +133,7 @@ def add(
         try:
             default_name = p.resolve(strict=True).name
         except FileNotFoundError:
+            _log_error("add_missing_file", message="File does not exist", vault=vault, path=str(p))
             typer.echo(f"✖ Add failed for {p}: file does not exist")
             errors += 1
             continue
@@ -145,9 +159,11 @@ def add(
             existing_names.add(effective_name)
             pending_names.add(effective_name)
         except (FileNotFoundError, ValueError) as exc:
+            _log_error("add_failed", message="Add failed", vault=vault, path=str(p), error=str(exc))
             typer.echo(f"✖ Add failed for {p}: {exc}")
             errors += 1
-        except Exception:
+        except Exception as exc:
+            _log_error("add_unexpected_error", message="Unexpected error while adding file", vault=vault, path=str(p), error=str(exc))
             typer.echo(f"✖ Unexpected error while adding {p}")
             errors += 1
     if errors:
@@ -175,36 +191,128 @@ def lst_cmd(vault: str, raw: bool = typer.Option(False, "--raw", help="Show raw 
         else:
             typer.echo(f"{name}\t{r.size} bytes\tid={r.id}\tadded={ts}")
 
-@app.command()
-def get(vault: str, name: str, out: str = typer.Option("-", "--out")):
-    """Decrypt a stored record and write it to stdout or the given output path."""
-    v = Vault(pathlib.Path(vault))
-    pw = ask_pw()
-    try:
-        data = v.get_file(pw, name, None if out == "-" else pathlib.Path(out))
-    except FileNotFoundError:
-        typer.echo("✖ File not found in vault")
-        raise typer.Exit(1)
-    except Exception:
-        typer.echo("✖ Failed to retrieve file")
-        raise typer.Exit(1)
-    if out == "-":
-        sys.stdout.buffer.write(data)
+def _expand_range(pattern: str) -> list[str] | None:
+    """Expand brace expressions like `file{001..010}.txt` into individual names."""
+    match = re.fullmatch(r"^(.*)\{(\d+)\.\.(\d+)\}(.*)$", pattern)
+    if not match:
+        return None
+    prefix, start, end, suffix = match.groups()
+    start_i, end_i = int(start), int(end)
+    if start_i > end_i:
+        start_i, end_i = end_i, start_i
+    width = max(len(start), len(end))
+    return [f"{prefix}{str(i).zfill(width)}{suffix}" for i in range(start_i, end_i + 1)]
+
+
+def _prompt_for_outputs(count: int, template: str | None) -> list[str | None]:
+    """Interactive helper that lets users confirm or skip each retrieval target."""
+    outputs: list[str | None] = []
+    for idx in range(1, count + 1):
+        default = (template.format(n=idx) if template and "{n}" in template else template) or f"recovered{idx}.txt"
+        val = typer.prompt(
+            f"Output filename for file #{idx} (type 'skip' to omit)",
+            default=default,
+        ).strip()
+        if not val:
+            val = default
+        if val.lower() == "skip":
+            outputs.append(None)
+        else:
+            outputs.append(val)
+    return outputs
+
 
 @app.command()
-def rm(vault: str, name: str, erase_blob: bool = typer.Option(False, "--erase-blob")):
-    """Delete a record from the vault and optionally wipe its encrypted blob."""
+def get(
+    vault: str,
+    names: list[str] = typer.Argument(..., metavar="NAME", help="One or more record names or brace ranges"),
+    out: str = typer.Option("-", "--out", help="Destination path, '-' for stdout, or brace template"),
+):
+    """Retrieve one or more records, supporting brace-expansion and interactive targets."""
     v = Vault(pathlib.Path(vault))
     pw = ask_pw()
-    try:
-        v.remove(pw, name, erase_blob=erase_blob)
-    except FileNotFoundError:
-        typer.echo("✖ File not found")
+
+    expanded_names: list[str] = []
+    for entry in names:
+        rng = _expand_range(entry)
+        if rng:
+            expanded_names.extend(rng)
+        else:
+            expanded_names.append(entry)
+    if not expanded_names:
+        typer.echo("✖ No files specified")
         raise typer.Exit(1)
-    except Exception:
-        typer.echo("✖ Failed to remove file")
+
+    if out == "-" and len(expanded_names) == 1:
+        outputs = ["-"]
+    else:
+        template_range = None if out in ("-", None) else _expand_range(out)
+        if template_range:
+            if len(template_range) != len(expanded_names):
+                typer.echo("✖ Output range count does not match number of files")
+                raise typer.Exit(1)
+            outputs = template_range
+        elif out not in ("-", None) and len(expanded_names) == 1:
+            outputs = [out]
+        else:
+            outputs = _prompt_for_outputs(len(expanded_names), None if out in ("-", None) else out)
+
+    errors = 0
+    for idx, name in enumerate(expanded_names):
+        target = outputs[idx]
+        if target is None:
+            typer.echo(f"↷ Skipped {name}")
+            continue
+        try:
+            data = v.get_file(pw, name, None if target == "-" else pathlib.Path(target))
+        except FileNotFoundError:
+            _log_error("get_not_found", message="Requested file not found", vault=vault, name=name)
+            typer.echo(f"✖ File not found in vault: {name}")
+            errors += 1
+            continue
+        except Exception as exc:
+            _log_error("get_failed", message="Failed to retrieve file", vault=vault, name=name, error=str(exc))
+            typer.echo(f"✖ Failed to retrieve file: {name}")
+            errors += 1
+            continue
+
+        if target == "-":
+            sys.stdout.buffer.write(data)
+        else:
+            typer.echo(f"✔ Retrieved {name} -> {target}")
+
+    if errors:
         raise typer.Exit(1)
-    typer.echo("Removed (crypto-shredded).")
+
+@app.command()
+def rm(
+    vault: str,
+    names: list[str] = typer.Argument(..., metavar="NAME", help="One or more record names to delete"),
+    keep_blob: bool = typer.Option(False, "--keep-blob", help="Leave ciphertext blob on disk for forensic recovery"),
+):
+    """Delete one or more records. Blobs are shredded unless --keep-blob is provided."""
+    v = Vault(pathlib.Path(vault))
+    pw = ask_pw()
+    if not keep_blob:
+        typer.echo("⚠ WARNING: This will crypto-shred the encrypted blobs. Use --keep-blob if you need forensic recovery.")
+        if not typer.confirm("Proceed with destructive removal?", default=False):
+            typer.echo("↷ Aborted.")
+            raise typer.Exit(0)
+    errors = 0
+    for name in names:
+        try:
+            v.remove(pw, name, erase_blob=not keep_blob)
+            typer.echo(f"✔ Removed {name}")
+        except FileNotFoundError:
+            _log_error("rm_not_found", message="Attempted to remove missing record", vault=vault, name=name)
+            typer.echo(f"✖ File not found: {name}")
+            errors += 1
+        except Exception as exc:
+            _log_error("rm_failed", message="Failed to remove record", vault=vault, name=name, error=str(exc))
+            typer.echo(f"✖ Failed to remove {name}")
+            errors += 1
+    if errors:
+        raise typer.Exit(1)
 
 @app.command("check")
 def check(vault: str):
@@ -220,7 +328,7 @@ def check(vault: str):
 
     has_error = False
 
-    # ----------------------------------------------------------------------
+    # ----------------------------------------------------check------------------
     # 1. Vault root checks
     # ----------------------------------------------------------------------
     if not vpath.exists():
@@ -455,26 +563,6 @@ def check(vault: str):
         typer.echo("✔ Vault passed all checks")
         raise typer.Exit(0)
 
-
-@app.command("audit-code")
-def audit_code(root: str = typer.Option(None, "--root", dir_okay=True, file_okay=False)):
-    """
-    Scan project sources to ensure banned C string APIs (gets/strcpy/strcat/sprintf) are not used.
-    Addresses checklist item 1.2 "Avoid unsafe string functions".
-    """
-    from .devcheck import scan_for_banned_string_funcs
-
-    if root is None:
-        base = pathlib.Path(__file__).resolve().parent
-    else:
-        base = pathlib.Path(root).resolve()
-    matches = scan_for_banned_string_funcs(base)
-    if matches:
-        typer.echo("✖ Banned C string APIs detected in source:")
-        for line in matches:
-            typer.echo(f"  {line}")
-        raise typer.Exit(1)
-    typer.echo("✔ No banned C string APIs found")
 
 @app.command("recover")
 def recover(
