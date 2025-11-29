@@ -8,7 +8,7 @@ It uses Argon2id + XChaCha20-Poly1305 encryption. All metadata and filenames are
 ## Setup
 
 ```bash
-git clone https://github.com/you/vaulter.git
+git clone https://github.com/JugresEstonia/Vaulter.git
 cd vaulter
 python -m venv .venv
 source .venv/bin/activate   # Linux / Mac
