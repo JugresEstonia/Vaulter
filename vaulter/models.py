@@ -10,7 +10,6 @@ class VaultConfig(BaseModel):
     """Top-level config file stored next to the vault; contains salts and wrap info."""
     version: int = 1
     kdf_salt_b64: str
-    argon2: dict
     index_ad_b64: str
     master_wrap_nonce_b64: Optional[str] = None
     wrapped_master_b64: Optional[str] = None

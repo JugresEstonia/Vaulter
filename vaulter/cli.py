@@ -308,6 +308,10 @@ def rm(
 def check(vault: str):
     """Audit vault permissions, integrity, and cryptographic metadata."""
     vpath = pathlib.Path(vault)
+    if not vpath.exists():
+        typer.echo(f"✖ Vault does not exist: {vpath}")
+        raise typer.Exit(1)
+
     pw = ask_pw("Enter master password:")
 
     def mode_bits(p: pathlib.Path) -> int:
@@ -316,15 +320,22 @@ def check(vault: str):
     def owned_by_me(p: pathlib.Path) -> bool:
         return os.lstat(p).st_uid == os.getuid()
 
+    # Authenticate before running any checks to avoid partial pass output on wrong passwords.
+    try:
+        vobj = Vault(vpath)
+        master = _load_master_or_exit(vobj, pw)
+    except typer.Exit:
+        raise
+    except Exception as exc:
+        _log_error("check_auth_failed", message="Failed to authenticate vault before checks", vault=vault, error=str(exc))
+        typer.echo(f"✖ Failed to load vault: {exc}")
+        raise typer.Exit(1)
+
     has_error = False
 
     # ----------------------------------------------------check------------------
     # 1. Vault root checks
     # ----------------------------------------------------------------------
-    if not vpath.exists():
-        typer.echo(f"✖ Vault does not exist: {vpath}")
-        raise typer.Exit(1)
-
     st = os.lstat(vpath)
     if stat.S_ISLNK(st.st_mode):
         typer.echo("✖ Vault root is a symlink (not allowed)")
@@ -406,8 +417,6 @@ def check(vault: str):
     # ----------------------------------------------------------------------
     # 3. Crypto/index load
     # ----------------------------------------------------------------------
-    vobj = Vault(vpath)
-    master = _load_master_or_exit(vobj, pw)
     try:
         idx = vobj._load_index(master)
     except Exception as e:

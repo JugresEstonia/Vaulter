@@ -206,7 +206,6 @@ class Vault:
 
         cfg = VaultConfig(
             kdf_salt_b64=b64e(salt),
-            argon2={"t":3,"m":256*1024,"p":2},
             index_ad_b64=b64e(ad),
             master_wrap_nonce_b64=b64e(wrap_nonce),
             wrapped_master_b64=b64e(wrapped_master),
